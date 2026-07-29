@@ -303,8 +303,10 @@ class GeneticPainting:
                     "cy": cy[i],
                     "size": self.rng.uniform(size_lo, size_hi),
                     "angle": angle,
-                    # Collage brushes read best pasted near-opaque.
-                    "opacity": self.rng.uniform(0.85, 1.0)
+                    # Collage brushes read best pasted mostly opaque, but
+                    # some translucency lets layered brushes mix tones the
+                    # palette doesn't contain.
+                    "opacity": self.rng.uniform(0.7, 1.0)
                     if self.keep_brush_color
                     else self.rng.uniform(0.6, 1.0),
                     "center_bias": self.rng.uniform(0.0, 0.5),
@@ -326,7 +328,7 @@ class GeneticPainting:
             np.clip(stroke["size"] * self.rng.uniform(0.8, 1.25), size_lo, size_hi)
         )
         child["angle"] = (stroke["angle"] + self.rng.uniform(-30, 30)) % 360
-        opacity_floor = 0.7 if self.keep_brush_color else 0.3
+        opacity_floor = 0.6 if self.keep_brush_color else 0.3
         child["opacity"] = float(
             np.clip(stroke["opacity"] + self.rng.uniform(-0.1, 0.1), opacity_floor, 1.0)
         )

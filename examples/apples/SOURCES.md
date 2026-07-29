@@ -17,6 +17,13 @@ author and license); backgrounds were removed with GrabCut
 | apple_8.png | [File:Golden Delicious apple 2021.jpg](https://commons.wikimedia.org/wiki/File:Golden_Delicious_apple_2021.jpg) |
 | apple_12.png | [File:Pomme verte.png](https://commons.wikimedia.org/wiki/File:Pomme_verte.png) |
 | apple_13.png | [File:The Granny Smith.jpg](https://commons.wikimedia.org/wiki/File:The_Granny_Smith.jpg) |
+| apple_20.png | [File:Arkansas black apple.jpg](https://commons.wikimedia.org/wiki/File:Arkansas_black_apple.jpg) |
+| apple_21.png, apple_22.png | [File:Granny smith and cross section.jpg](https://commons.wikimedia.org/wiki/File:Granny_smith_and_cross_section.jpg) |
+| apple_23.png | [File:Honeycrisp-Apple.jpg](https://commons.wikimedia.org/wiki/File:Honeycrisp-Apple.jpg) |
+| apple_24.png, apple_25.png | [File:Pink lady and cross section.jpg](https://commons.wikimedia.org/wiki/File:Pink_lady_and_cross_section.jpg) |
+| apple_26.png, apple_27.png | [File:Red delicious and cross section.jpg](https://commons.wikimedia.org/wiki/File:Red_delicious_and_cross_section.jpg) |
+| apple_28.png | [File:Red delicious, half.jpg](https://commons.wikimedia.org/wiki/File:Red_delicious,_half.jpg) |
+| apple_29.png | [File:Yellow Transparent.jpg](https://commons.wikimedia.org/wiki/File:Yellow_Transparent.jpg) |
 
 The Bad Apple!! shadow animation used as the video-painting reference is
 the well-known Touhou fan animation (music: "Bad Apple!!" feat. nomico,
