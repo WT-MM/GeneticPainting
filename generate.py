@@ -15,11 +15,19 @@ import random
 
 import cv2
 import numpy as np
+from PIL import Image
 
 
 class GeneticPainting:
     def __init__(self, img, shapes, seed=0, max_dim=1200, canvas="mean", init_canvas=None,
-                 edge_weight=1.0):
+                 edge_weight=1.0, keep_brush_color=False, brush_max_dim=None,
+                 sample_gamma=1.0):
+        self.keep_brush_color = keep_brush_color
+        # Positions are sampled with probability error**sample_gamma.
+        # >1 concentrates strokes on the worst regions — useful when a
+        # brush set has a high irreducible error floor (collage mode)
+        # that would otherwise drown out small high-error features.
+        self.sample_gamma = sample_gamma
         reference = cv2.imread(img)
         if reference is None:
             raise FileNotFoundError(f"could not read reference image: {img}")
@@ -39,7 +47,9 @@ class GeneticPainting:
         # bounding box. Soft (textured) alpha is preserved. A brush PNG's
         # alpha channel is used when present; otherwise its luminance is
         # the mask (auto-inverted if the image has a bright background).
-        self.brushes = self._load_brushes(shapes)
+        self.brushes = self._load_brushes(
+            shapes, keep_color=keep_brush_color, max_dim=brush_max_dim
+        )
         if not self.brushes:
             raise ValueError("no usable brush shapes found")
 
@@ -57,15 +67,31 @@ class GeneticPainting:
                 start = np.zeros(3, np.float32)
             self.canvas = np.full_like(self.reference, start)
 
+        self.edge_weight = edge_weight
+        self.set_reference(reference)
+
+    def set_reference(self, reference):
+        """Set (or swap) the target image, keeping the current canvas.
+        Swapping mid-run is how video painting works: only regions where
+        the new frame differs from the canvas show error, so each frame
+        needs few strokes."""
+        if reference.shape[:2] != (self.h, self.w):
+            reference = cv2.resize(
+                reference, (self.w, self.h), interpolation=cv2.INTER_AREA
+            )
+        self.reference = reference.astype(np.float32)
+
         # Perceptual weighting: plain L1 error underweights small, crisp
         # features (a pale moon on pale clouds is numerically invisible),
         # so per-pixel error is scaled up near edges of the reference.
-        gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        gray = cv2.cvtColor(reference.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(
+            np.float32
+        )
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.GaussianBlur(cv2.magnitude(gx, gy), (0, 0), 3)
         hi = np.percentile(grad, 95)
-        self.weight_map = 1.0 + edge_weight * np.clip(grad / max(hi, 1e-6), 0, 1)
+        self.weight_map = 1.0 + self.edge_weight * np.clip(grad / max(hi, 1e-6), 0, 1)
 
         # Local edge orientation (degrees) for gradient-aligned strokes:
         # new strokes start roughly parallel to nearby edges, which reads
@@ -85,10 +111,19 @@ class GeneticPainting:
         )
 
     @staticmethod
-    def _load_brushes(paths):
+    def _load_brushes(paths, keep_color=False, max_dim=None):
         """Load brush images as float masks in [0, 1], cropped to their
         bounding box. The alpha channel is the mask when present;
-        otherwise luminance (auto-inverted for bright backgrounds)."""
+        otherwise luminance (auto-inverted for bright backgrounds).
+
+        With keep_color, each brush is (mask, bgr) and strokes paste the
+        brush's own pixels instead of a color sampled from the reference
+        — collage mode. Without it each brush is (mask, None).
+
+        max_dim caps the stored brush resolution. Stroke rendering
+        resizes from the stored brush every evaluation and that cost
+        scales with the source area, so keep brushes no larger than
+        ~2x the biggest stroke you'll paint."""
         brushes = []
         for path in paths:
             im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -113,23 +148,34 @@ class GeneticPainting:
             ys, xs = np.nonzero(mask > 0)
             if len(xs) == 0:
                 continue
-            brushes.append(mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1])
+            crop = np.s_[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+            mask = mask[crop]
+            color = None
+            if keep_color and im.ndim == 3:
+                color = im[crop][:, :, :3].astype(np.float32) * (255.0 / scale_to_unit)
+            if max_dim and max(mask.shape) > max_dim:
+                s = max_dim / max(mask.shape)
+                wh = (max(1, int(mask.shape[1] * s)), max(1, int(mask.shape[0] * s)))
+                mask = cv2.resize(mask, wh, interpolation=cv2.INTER_AREA)
+                if color is not None:
+                    color = cv2.resize(color, wh, interpolation=cv2.INTER_AREA)
+            brushes.append((mask, color))
         return brushes
 
     # ------------------------------------------------------------------
     # Stroke rendering
 
     def render_mask(self, stroke):
-        """Rasterize a stroke's brush mask and return (mask, x0, y0) where
-        (x0, y0) is the top-left corner of the mask on the canvas, or None
-        if the stroke lands entirely off-canvas."""
-        brush = self.brushes[stroke["brush"]]
+        """Rasterize a stroke's brush and return (mask, color, x0, y0)
+        where (x0, y0) is the top-left corner on the canvas and color is
+        the transformed brush pixels (None unless keep_brush_color), or
+        None if the stroke lands entirely off-canvas."""
+        brush, brush_color = self.brushes[stroke["brush"]]
         bh, bw = brush.shape
         s = stroke["size"] / max(bh, bw)
-        mask = cv2.resize(
-            brush, (max(1, int(bw * s)), max(1, int(bh * s))),
-            interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR,
-        )
+        new_wh = (max(1, int(bw * s)), max(1, int(bh * s)))
+        interp = cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR
+        mask = cv2.resize(brush, new_wh, interpolation=interp)
 
         # Rotate with an expanded output so nothing gets clipped.
         mh, mw = mask.shape
@@ -149,10 +195,16 @@ class GeneticPainting:
         cx1, cy1 = min(self.w, x0 + nw), min(self.h, y0 + nh)
         if cx0 >= cx1 or cy0 >= cy1:
             return None
-        mask = mask[cy0 - y0 : cy1 - y0, cx0 - x0 : cx1 - x0]
+        clip = np.s_[cy0 - y0 : cy1 - y0, cx0 - x0 : cx1 - x0]
+        mask = mask[clip]
         if mask.max() <= 0:
             return None
-        return mask, cx0, cy0
+
+        color = None
+        if brush_color is not None:
+            color = cv2.resize(brush_color, new_wh, interpolation=interp)
+            color = cv2.warpAffine(color, m, (nw, nh), flags=cv2.INTER_LINEAR)[clip]
+        return mask, color, cx0, cy0
 
     def stroke_delta(self, stroke):
         """Error change if this stroke were painted (negative = improvement).
@@ -163,7 +215,7 @@ class GeneticPainting:
         rendered = self.render_mask(stroke)
         if rendered is None:
             return np.inf
-        mask, x0, y0 = rendered
+        mask, brush_color, x0, y0 = rendered
         mh, mw = mask.shape
 
         ref = self.reference[y0 : y0 + mh, x0 : x0 + mw]
@@ -173,19 +225,23 @@ class GeneticPainting:
         total = weight.sum()
         if total <= 0:
             return np.inf
-        color = (ref * weight).sum(axis=(0, 1)) / total
 
-        # Blend toward the color at the stroke center so small bright/dark
-        # features (moon, lit windows) aren't averaged away by a footprint
-        # that is mostly background.
-        b = stroke["center_bias"]
-        if b > 0:
-            px = int(np.clip(stroke["cx"], 2, self.w - 3))
-            py = int(np.clip(stroke["cy"], 2, self.h - 3))
-            center = self.reference[py - 2 : py + 3, px - 2 : px + 3].mean(axis=(0, 1))
-            color = (1 - b) * color + b * center
-        color = np.clip(color + stroke["jitter"], 0, 255)
-        stroke["color"] = color
+        if brush_color is not None:
+            # Collage mode: the brush brings its own pixels.
+            color = brush_color
+        else:
+            color = (ref * weight).sum(axis=(0, 1)) / total
+            # Blend toward the color at the stroke center so small
+            # bright/dark features (moon, lit windows) aren't averaged
+            # away by a footprint that is mostly background.
+            b = stroke["center_bias"]
+            if b > 0:
+                px = int(np.clip(stroke["cx"], 2, self.w - 3))
+                py = int(np.clip(stroke["cy"], 2, self.h - 3))
+                center = self.reference[py - 2 : py + 3, px - 2 : px + 3].mean(axis=(0, 1))
+                color = (1 - b) * color + b * center
+            color = np.clip(color + stroke["jitter"], 0, 255)
+            stroke["color"] = color
 
         new = cur * (1 - weight) + color * weight
         w = self.weight_map[y0 : y0 + mh, x0 : x0 + mw]
@@ -194,11 +250,12 @@ class GeneticPainting:
         return new_err - old_err
 
     def commit(self, stroke):
-        mask, x0, y0 = self.render_mask(stroke)
+        mask, brush_color, x0, y0 = self.render_mask(stroke)
         mh, mw = mask.shape
         weight = (mask * stroke["opacity"])[..., None]
         region = np.s_[y0 : y0 + mh, x0 : x0 + mw]
-        self.canvas[region] = self.canvas[region] * (1 - weight) + stroke["color"] * weight
+        color = brush_color if brush_color is not None else stroke["color"]
+        self.canvas[region] = self.canvas[region] * (1 - weight) + color * weight
         self.error_map[region] = (
             np.abs(self.reference[region] - self.canvas[region]).sum(axis=2)
             * self.weight_map[region]
@@ -216,6 +273,8 @@ class GeneticPainting:
             interpolation=cv2.INTER_AREA,
         )
         p = small.flatten().astype(np.float64)
+        if self.sample_gamma != 1.0:
+            p **= self.sample_gamma
         if p.sum() <= 0:
             p = np.ones_like(p)
         idx = self.rng.choice(len(p), size=n, p=p / p.sum())
@@ -244,7 +303,10 @@ class GeneticPainting:
                     "cy": cy[i],
                     "size": self.rng.uniform(size_lo, size_hi),
                     "angle": angle,
-                    "opacity": self.rng.uniform(0.6, 1.0),
+                    # Collage brushes read best pasted near-opaque.
+                    "opacity": self.rng.uniform(0.85, 1.0)
+                    if self.keep_brush_color
+                    else self.rng.uniform(0.6, 1.0),
                     "center_bias": self.rng.uniform(0.0, 0.5),
                     "jitter": np.zeros(3, np.float32),
                 }
@@ -264,7 +326,10 @@ class GeneticPainting:
             np.clip(stroke["size"] * self.rng.uniform(0.8, 1.25), size_lo, size_hi)
         )
         child["angle"] = (stroke["angle"] + self.rng.uniform(-30, 30)) % 360
-        child["opacity"] = float(np.clip(stroke["opacity"] + self.rng.uniform(-0.1, 0.1), 0.3, 1.0))
+        opacity_floor = 0.7 if self.keep_brush_color else 0.3
+        child["opacity"] = float(
+            np.clip(stroke["opacity"] + self.rng.uniform(-0.1, 0.1), opacity_floor, 1.0)
+        )
         child["center_bias"] = float(
             np.clip(stroke["center_bias"] + self.rng.uniform(-0.2, 0.2), 0.0, 1.0)
         )
@@ -335,6 +400,9 @@ class GeneticPainting:
         group=1,
         out_dir="output",
         save_every=100,
+        gif=None,
+        gif_every=None,
+        gif_width=640,
     ):
         os.makedirs(out_dir, exist_ok=True)
         short = min(self.h, self.w)
@@ -342,6 +410,10 @@ class GeneticPainting:
             max_size = short * 0.5
         if min_size is None:
             min_size = max(6, short * 0.015)
+
+        if gif_every is None:
+            gif_every = max(1, strokes // 150)
+        frames = []
 
         painted = 0
         for i in range(strokes):
@@ -361,6 +433,9 @@ class GeneticPainting:
                     self.commit(stroke)
                     painted += 1
 
+            if gif and ((i + 1) % gif_every == 0 or i == strokes - 1):
+                frames.append(self._gif_frame(gif_width))
+
             if (i + 1) % save_every == 0 or i == strokes - 1:
                 err = self.error_map.mean()
                 unit = "round" if group > 1 else "stroke"
@@ -377,7 +452,42 @@ class GeneticPainting:
         final = os.path.join(out_dir, "final.png")
         cv2.imwrite(final, self.canvas.astype(np.uint8))
         print(f"done: {final}")
+
+        if gif and frames:
+            self._write_gif(gif, frames)
         return self.canvas.astype(np.uint8)
+
+    def _gif_frame(self, width):
+        h = max(1, int(round(self.h * width / self.w)))
+        small = cv2.resize(
+            self.canvas.astype(np.uint8), (width, h), interpolation=cv2.INTER_AREA
+        )
+        return Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+
+    @staticmethod
+    def _write_gif(path, frames, frame_ms=60, hold_ms=2500):
+        durations = [frame_ms] * (len(frames) - 1) + [hold_ms]
+        frames[0].save(
+            path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=0,
+            optimize=True,
+        )
+        print(f"gif: {path} ({len(frames)} frames)")
+
+
+def resolve_shapes(path_or_glob):
+    """A directory of brush images (case-insensitive png/jpg/jpeg) or a
+    glob pattern, resolved to a sorted list of paths."""
+    if os.path.isdir(path_or_glob):
+        return sorted(
+            os.path.join(path_or_glob, name)
+            for name in os.listdir(path_or_glob)
+            if name.lower().endswith((".png", ".jpg", ".jpeg"))
+        )
+    return sorted(glob.glob(path_or_glob))
 
 
 def main():
@@ -388,6 +498,20 @@ def main():
                              "(alpha channel used if present, else luminance)")
     parser.add_argument("--group", type=int, default=1,
                         help="strokes evolved jointly per round (1 = greedy)")
+    parser.add_argument("--keep-brush-color", action="store_true",
+                        help="collage mode: paste the brush's own pixels instead "
+                             "of recoloring from the reference")
+    parser.add_argument("--gif", default=None,
+                        help="also write a timelapse GIF to this path")
+    parser.add_argument("--gif-every", type=int, default=None,
+                        help="strokes per GIF frame (default: ~150 frames total)")
+    parser.add_argument("--gif-width", type=int, default=640, help="GIF frame width")
+    parser.add_argument("--brush-max-dim", type=int, default=None,
+                        help="cap stored brush resolution (default: 2x max stroke "
+                             "size; rendering cost scales with brush area)")
+    parser.add_argument("--sample-gamma", type=float, default=1.0,
+                        help="sharpen stroke placement toward high-error regions "
+                             "(probability = error**gamma)")
     parser.add_argument("--strokes", type=int, default=1500, help="number of strokes to paint")
     parser.add_argument("--population", type=int, default=32, help="GA population per stroke")
     parser.add_argument("--generations", type=int, default=10, help="GA generations per stroke")
@@ -407,17 +531,16 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    if os.path.isdir(args.shapes):
-        shapes = sorted(
-            os.path.join(args.shapes, name)
-            for name in os.listdir(args.shapes)
-            if name.lower().endswith((".png", ".jpg", ".jpeg"))
-        )
-    else:
-        shapes = sorted(glob.glob(args.shapes))
+    shapes = resolve_shapes(args.shapes)
+    brush_cap = args.brush_max_dim
+    if brush_cap is None:
+        brush_cap = int(2 * args.max_size) if args.max_size else 2 * args.max_dim // 4
     gp = GeneticPainting(args.image, shapes, seed=args.seed, max_dim=args.max_dim,
                          canvas=args.canvas, init_canvas=args.init_canvas,
-                         edge_weight=args.edge_weight)
+                         edge_weight=args.edge_weight,
+                         keep_brush_color=args.keep_brush_color,
+                         brush_max_dim=brush_cap,
+                         sample_gamma=args.sample_gamma)
     gp.generate(
         strokes=args.strokes,
         population_size=args.population,
@@ -427,6 +550,9 @@ def main():
         group=args.group,
         out_dir=args.out,
         save_every=args.save_every,
+        gif=args.gif,
+        gif_every=args.gif_every,
+        gif_width=args.gif_width,
     )
 
 

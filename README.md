@@ -44,6 +44,40 @@ experimentation. Group fitness ignores stroke-stroke overlap, so each
 stroke is re-checked exactly before committing — the canvas never gets
 worse.
 
+## Collage mode: paintings made of real things
+
+`--keep-brush-color` pastes each brush's own pixels instead of recoloring
+it from the reference — evolution then places brushes where their real
+colors already match. With photos of real apples as brushes
+(`examples/apples/`, cut out from Wikimedia Commons photos with GrabCut),
+the skyline becomes the Big Apple made of apples:
+
+![NYC made of apples](examples/nyc_apples.gif)
+
+```bash
+python generate.py test.jpg --shapes examples/apples --keep-brush-color \
+    --canvas black --strokes 7000 --max-dim 1000 --brush-max-dim 300 \
+    --gif nyc_apples.gif
+```
+
+Start from `--canvas black` so every region needs paint (on a mean-color
+canvas, flat regions are already "correct" and never get tiled).
+`--gif` writes a timelapse of any run.
+
+`examples/bad_apple.py` paints a whole video: the canvas persists across
+frames, so the error map concentrates strokes exactly where the video
+moved (temporal coherence), and each frame paints until improvement
+plateaus — Bad Apple!!, but it's literally apples:
+
+![Bad Apple but it's apples](examples/bad_apple.gif)
+
+```bash
+python examples/bad_apple.py bad_apple.mp4 --shapes examples/apples \
+    --out bad_apple_painted.mp4
+```
+
+Brush photo credits: [examples/apples/SOURCES.md](examples/apples/SOURCES.md).
+
 ## Brushes
 
 `generate.py` accepts any directory (or glob) of brush images via
