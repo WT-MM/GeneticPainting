@@ -6,6 +6,10 @@ is found with a small genetic algorithm.
 
 ![final painting](output/final.png)
 
+Textured stroke brushes above; the same pipeline with hard-edged blob
+brushes gives a mosaic look instead
+([output/final_blobs.png](output/final_blobs.png)).
+
 ## How it works
 
 1. The canvas starts as the reference's mean color.
@@ -29,16 +33,40 @@ near edges of the reference, because plain L1 error underweights small,
 crisp features — a pale moon on pale clouds is numerically almost
 invisible but perceptually obvious.
 
+New strokes start roughly aligned with the local edge direction of the
+reference (gradient-aligned initialization), so brushwork follows the
+form; evolution is free to rotate away from it.
+
+`--group N` evolves N strokes jointly per round (anopara-style DNA with
+uniform crossover) instead of one at a time. At equal compute the greedy
+default converges noticeably better; group mode is kept for
+experimentation. Group fitness ignores stroke-stroke overlap, so each
+stroke is re-checked exactly before committing — the canvas never gets
+worse.
+
+## Brushes
+
+`generate.py` accepts any directory (or glob) of brush images via
+`--shapes`: the alpha channel is used as a soft mask when present,
+otherwise luminance (auto-inverted for bright backgrounds), so scanned
+or hand-drawn brushes work as-is. `shapes.py` generates two built-in
+styles: hard-edged blobs (`shapes/`) and textured fiber strokes
+(`brushes/`, via `--style stroke`).
+
 ## Usage
 
 ```bash
 pip install -r requirements.txt
 
-# regenerate the random brush masks (optional, 10 already included)
-python shapes.py
+# regenerate the built-in brushes (optional, already included)
+python shapes.py                                        # hard-edged blobs -> shapes/
+python shapes.py --style stroke --out brushes --seed 5  # textured strokes -> brushes/
 
-# paint (defaults: test.jpg, 1500 strokes)
+# paint (defaults: test.jpg, 1500 strokes, blob brushes)
 python generate.py test.jpg --strokes 3000 --max-dim 1600 --out output
+
+# textured-brush painting (see output/final.png)
+python generate.py test.jpg --shapes brushes --strokes 3500 --max-dim 1600 --out output
 
 # optional: refine an existing result with small strokes and blob brushes only
 python generate.py test.jpg --shapes 'shapes/[2346789].png' \

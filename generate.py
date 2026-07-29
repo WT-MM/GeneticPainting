@@ -36,18 +36,10 @@ class GeneticPainting:
         self.rng = np.random.default_rng(seed)
 
         # Brushes are stored as float masks in [0, 1], cropped to their
-        # bounding box so rotation/scaling works on the actual blob.
-        self.brushes = []
-        for path in shapes:
-            im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if im is None or im.shape[2] < 4:
-                continue
-            alpha = im[:, :, 3]
-            ys, xs = np.nonzero(alpha)
-            if len(xs) == 0:
-                continue
-            mask = alpha[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
-            self.brushes.append(mask.astype(np.float32) / 255.0)
+        # bounding box. Soft (textured) alpha is preserved. A brush PNG's
+        # alpha channel is used when present; otherwise its luminance is
+        # the mask (auto-inverted if the image has a bright background).
+        self.brushes = self._load_brushes(shapes)
         if not self.brushes:
             raise ValueError("no usable brush shapes found")
 
@@ -75,10 +67,54 @@ class GeneticPainting:
         hi = np.percentile(grad, 95)
         self.weight_map = 1.0 + edge_weight * np.clip(grad / max(hi, 1e-6), 0, 1)
 
+        # Local edge orientation (degrees) for gradient-aligned strokes:
+        # new strokes start roughly parallel to nearby edges, which reads
+        # as "strokes following the form". getRotationMatrix2D rotates
+        # counter-clockwise in display coordinates while image y points
+        # down, hence 90 - angle rather than angle + 90. Alignment is only
+        # trusted where there is an actual gradient — in flat regions the
+        # angle is meaningless and strokes stay random.
+        sx = cv2.GaussianBlur(gx, (0, 0), 6)
+        sy = cv2.GaussianBlur(gy, (0, 0), 6)
+        self.orientation = 90.0 - np.degrees(np.arctan2(sy, sx))
+        self.oriented = cv2.magnitude(sx, sy) > 1.0
+
         # Per-pixel (weighted) error, kept in sync with the canvas.
         self.error_map = (
             np.abs(self.reference - self.canvas).sum(axis=2) * self.weight_map
         )
+
+    @staticmethod
+    def _load_brushes(paths):
+        """Load brush images as float masks in [0, 1], cropped to their
+        bounding box. The alpha channel is the mask when present;
+        otherwise luminance (auto-inverted for bright backgrounds)."""
+        brushes = []
+        for path in paths:
+            im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if im is None:
+                continue
+            scale_to_unit = (
+                float(np.iinfo(im.dtype).max) if np.issubdtype(im.dtype, np.integer)
+                else 1.0
+            )
+            if im.ndim == 3 and im.shape[2] == 4:
+                mask = im[:, :, 3].astype(np.float32) / scale_to_unit
+            else:
+                gray = im if im.ndim == 2 else cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+                mask = gray.astype(np.float32) / scale_to_unit
+                border = np.concatenate([mask[0], mask[-1], mask[:, 0], mask[:, -1]])
+                if np.median(border) > 0.5:
+                    mask = 1.0 - mask
+                # Luminance masks come from scans/photos: kill residual
+                # background noise or every stroke drags a faint
+                # rectangular wash along with it.
+                mask[mask < 0.05] = 0.0
+            ys, xs = np.nonzero(mask > 0)
+            if len(xs) == 0:
+                continue
+            brushes.append(mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1])
+        return brushes
 
     # ------------------------------------------------------------------
     # Stroke rendering
@@ -191,25 +227,39 @@ class GeneticPainting:
 
     def random_population(self, n, size_lo, size_hi):
         cx, cy = self.sample_positions(n)
-        return [
-            {
-                "brush": random.randrange(len(self.brushes)),
-                "cx": cx[i],
-                "cy": cy[i],
-                "size": self.rng.uniform(size_lo, size_hi),
-                "angle": self.rng.uniform(0, 360),
-                "opacity": self.rng.uniform(0.6, 1.0),
-                "center_bias": self.rng.uniform(0.0, 0.5),
-                "jitter": np.zeros(3, np.float32),
-            }
-            for i in range(n)
-        ]
+        population = []
+        for i in range(n):
+            # Most strokes start aligned with the local edge direction;
+            # some stay fully random so evolution keeps its diversity.
+            px = int(np.clip(cx[i], 0, self.w - 1))
+            py = int(np.clip(cy[i], 0, self.h - 1))
+            if self.oriented[py, px] and self.rng.random() < 0.7:
+                angle = (self.orientation[py, px] + self.rng.normal(0, 15)) % 360
+            else:
+                angle = self.rng.uniform(0, 360)
+            population.append(
+                {
+                    "brush": random.randrange(len(self.brushes)),
+                    "cx": cx[i],
+                    "cy": cy[i],
+                    "size": self.rng.uniform(size_lo, size_hi),
+                    "angle": angle,
+                    "opacity": self.rng.uniform(0.6, 1.0),
+                    "center_bias": self.rng.uniform(0.0, 0.5),
+                    "jitter": np.zeros(3, np.float32),
+                }
+            )
+        return population
 
     def mutate(self, stroke, size_lo, size_hi):
         child = dict(stroke)
         child["jitter"] = stroke["jitter"].copy()
-        child["cx"] = stroke["cx"] + self.rng.normal(0, stroke["size"] * 0.25)
-        child["cy"] = stroke["cy"] + self.rng.normal(0, stroke["size"] * 0.25)
+        child["cx"] = float(
+            np.clip(stroke["cx"] + self.rng.normal(0, stroke["size"] * 0.25), 0, self.w - 1)
+        )
+        child["cy"] = float(
+            np.clip(stroke["cy"] + self.rng.normal(0, stroke["size"] * 0.25), 0, self.h - 1)
+        )
         child["size"] = float(
             np.clip(stroke["size"] * self.rng.uniform(0.8, 1.25), size_lo, size_hi)
         )
@@ -225,19 +275,53 @@ class GeneticPainting:
             child["brush"] = random.randrange(len(self.brushes))
         return child
 
-    def evolve_stroke(self, pop_size, generations, size_lo, size_hi, elite_frac=0.25):
-        population = self.random_population(pop_size, size_lo, size_hi)
+    def group_fitness(self, group):
+        """Approximate fitness of a stroke group: sum of each stroke's
+        delta against the current canvas, ignoring stroke-stroke overlap
+        (positions come from error-map sampling, so overlap is rare).
+        Exact re-evaluation happens at commit time. Invalid (off-canvas)
+        strokes get a penalty large enough to always lose to any group
+        of real strokes."""
+        total = 0.0
+        for stroke in group:
+            d = self.stroke_delta(stroke)
+            total += d if np.isfinite(d) else 1e9
+        return total
+
+    def evolve_group(self, group_size, pop_size, generations, size_lo, size_hi,
+                     elite_frac=0.25):
+        """Evolve a group of strokes jointly (anopara-style DNA with
+        uniform crossover). group_size 1 degenerates to a single-stroke
+        GA with mutation only."""
+        flat = self.random_population(group_size * pop_size, size_lo, size_hi)
+        population = [
+            flat[i * group_size : (i + 1) * group_size] for i in range(pop_size)
+        ]
         scored = sorted(
-            ((self.stroke_delta(s), s) for s in population), key=lambda t: t[0]
+            ((self.group_fitness(g), g) for g in population), key=lambda t: t[0]
         )
         n_elite = max(2, int(pop_size * elite_frac))
         for _ in range(generations - 1):
             elites = scored[:n_elite]
             children = []
-            for i in range(pop_size - n_elite):
-                parent = elites[i % n_elite][1]
-                child = self.mutate(parent, size_lo, size_hi)
-                children.append((self.stroke_delta(child), child))
+            for _ in range(pop_size - n_elite):
+                pa = random.choice(elites)[1]
+                pb = random.choice(elites)[1]
+                child = []
+                mutated = False
+                for k in range(group_size):
+                    gene = pa[k] if self.rng.random() < 0.5 else pb[k]
+                    if group_size == 1 or self.rng.random() < 0.5:
+                        gene = self.mutate(gene, size_lo, size_hi)
+                        mutated = True
+                    else:
+                        gene = dict(gene)
+                        gene["jitter"] = gene["jitter"].copy()
+                    child.append(gene)
+                if not mutated:
+                    k = random.randrange(group_size)
+                    child[k] = self.mutate(child[k], size_lo, size_hi)
+                children.append((self.group_fitness(child), child))
             scored = sorted(elites + children, key=lambda t: t[0])
         return scored[0]
 
@@ -248,6 +332,7 @@ class GeneticPainting:
         generations=10,
         min_size=None,
         max_size=None,
+        group=1,
         out_dir="output",
         save_every=100,
     ):
@@ -265,17 +350,22 @@ class GeneticPainting:
             center = max_size * (min_size / max_size) ** t
             size_lo, size_hi = center * 0.6, center * 1.4
 
-            delta, best = self.evolve_stroke(
-                population_size, generations, size_lo, size_hi
+            _, best_group = self.evolve_group(
+                max(1, group), population_size, generations, size_lo, size_hi
             )
-            if delta < 0:
-                self.commit(best)
-                painted += 1
+            # Group fitness ignores stroke-stroke overlap, so re-check each
+            # stroke exactly against the evolving canvas: the painting
+            # never gets worse.
+            for stroke in best_group:
+                if self.stroke_delta(stroke) < 0:
+                    self.commit(stroke)
+                    painted += 1
 
             if (i + 1) % save_every == 0 or i == strokes - 1:
                 err = self.error_map.mean()
+                unit = "round" if group > 1 else "stroke"
                 print(
-                    f"stroke {i + 1}/{strokes}  painted={painted}  "
+                    f"{unit} {i + 1}/{strokes}  painted={painted}  "
                     f"mean error/px={err:.2f}",
                     flush=True,
                 )
@@ -293,7 +383,11 @@ class GeneticPainting:
 def main():
     parser = argparse.ArgumentParser(description="Paint an image with an evolved stroke sequence.")
     parser.add_argument("image", nargs="?", default="test.jpg", help="reference image")
-    parser.add_argument("--shapes", default="shapes/*.png", help="glob of brush shape PNGs")
+    parser.add_argument("--shapes", default="shapes/*.png",
+                        help="brush images: a glob or a directory of PNGs "
+                             "(alpha channel used if present, else luminance)")
+    parser.add_argument("--group", type=int, default=1,
+                        help="strokes evolved jointly per round (1 = greedy)")
     parser.add_argument("--strokes", type=int, default=1500, help="number of strokes to paint")
     parser.add_argument("--population", type=int, default=32, help="GA population per stroke")
     parser.add_argument("--generations", type=int, default=10, help="GA generations per stroke")
@@ -313,7 +407,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    shapes = sorted(glob.glob(args.shapes))
+    if os.path.isdir(args.shapes):
+        shapes = sorted(
+            os.path.join(args.shapes, name)
+            for name in os.listdir(args.shapes)
+            if name.lower().endswith((".png", ".jpg", ".jpeg"))
+        )
+    else:
+        shapes = sorted(glob.glob(args.shapes))
     gp = GeneticPainting(args.image, shapes, seed=args.seed, max_dim=args.max_dim,
                          canvas=args.canvas, init_canvas=args.init_canvas,
                          edge_weight=args.edge_weight)
@@ -323,6 +424,7 @@ def main():
         generations=args.generations,
         min_size=args.min_size,
         max_size=args.max_size,
+        group=args.group,
         out_dir=args.out,
         save_every=args.save_every,
     )
