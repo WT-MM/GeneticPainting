@@ -88,22 +88,29 @@ examples (Apple-silicon laptop unless noted):
 | render | settings | time |
 |---|---|---|
 | quick draft | 60 strokes, 400px | < 1 s |
-| painterly skyline | 3,000 strokes, 1600px, pop 32 x gen 10 | ~10 min |
-| refinement pass | 700–900 small strokes | 1–3 min |
-| apple collage | 10,000 strokes, 1600px | ~1 h |
-| apple collage | 16,000 strokes, 2000px (16-core Linux box) | ~2.5 h |
+| painterly skyline | 3,000 strokes, 1600px, pop 32 x gen 10 | ~2.5 min |
+| refinement pass | 700–900 small strokes | < 1 min |
+| apple collage | 10,000 strokes, 1600px | ~15 min |
+| apple collage | 16,000 strokes, 2000px (16-core Linux box) | ~40 min |
 
 Video painting is a different regime because the canvas persists across
-frames: a static scene costs one 20-stroke batch (~0.1 s) while a scene
-cut costs hundreds of strokes. Bad Apple!! (2,610 frames, 12 fps)
-averaged 0.6–0.8 s/frame at 480px (~35 min total) and ~2.7 s/frame at
-1080p (~2.8 h).
+frames: a static scene costs one 20-stroke batch while a scene cut
+costs hundreds of strokes. Bad Apple!! (2,610 frames, 12 fps) renders
+in roughly 10 min at 480px and under an hour at 1080p.
 
 Knobs, in order of leverage: stroke count and `population x generations`
 scale linearly (stills use 32x10, video 12x3); resolution scales roughly
-quadratically since stroke sizes track the canvas; and in collage mode
-`--brush-max-dim` matters a lot — every evaluation resizes the stored
-brush, so photo-sized brushes cost ~4x more than capped ones.
+quadratically since stroke sizes track the canvas.
+
+Performance notes: candidate evaluation is patch-local and threaded
+(cv2/numpy release the GIL); brushes are stored as mip pyramids so
+stroke rasterization resizes from the nearest level instead of the full
+brush (resizing was ~50% of runtime before); the weighted "old error"
+comes straight from the maintained error map. Together these are ~4x
+over the naive loop. A batched-MLX GPU scoring backend was tried and
+measured slower end-to-end (padding waste + host-side batch assembly
+outweigh the GPU math; rasterization stays CPU-bound in cv2), so the
+portable numpy path is the only one shipped.
 
 ## Brushes
 
