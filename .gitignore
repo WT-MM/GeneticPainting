@@ -163,3 +163,4 @@ cython_debug/
 bad_apple_painted.mp4
 *.noaudio.mp4
 bad_apple_painted_1080.mp4
+mediakit/
