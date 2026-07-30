@@ -405,6 +405,9 @@ class GeneticPainting:
         gif=None,
         gif_every=None,
         gif_width=640,
+        timelapse=None,
+        timelapse_width=1280,
+        timelapse_fps=30,
     ):
         os.makedirs(out_dir, exist_ok=True)
         short = min(self.h, self.w)
@@ -416,6 +419,15 @@ class GeneticPainting:
         if gif_every is None:
             gif_every = max(1, strokes // 150)
         frames = []
+
+        writer = None
+        if timelapse:
+            w = timelapse_width - timelapse_width % 2
+            h = int(round(self.h * w / self.w / 2) * 2)
+            writer = cv2.VideoWriter(
+                timelapse, cv2.VideoWriter_fourcc(*"mp4v"), timelapse_fps, (w, h)
+            )
+            self._tl_size = (w, h)
 
         painted = 0
         for i in range(strokes):
@@ -437,6 +449,13 @@ class GeneticPainting:
 
             if gif and ((i + 1) % gif_every == 0 or i == strokes - 1):
                 frames.append(self._gif_frame(gif_width))
+            if writer and ((i + 1) % gif_every == 0 or i == strokes - 1):
+                writer.write(
+                    cv2.resize(
+                        self.canvas.astype(np.uint8), self._tl_size,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                )
 
             if (i + 1) % save_every == 0 or i == strokes - 1:
                 err = self.error_map.mean()
@@ -457,6 +476,16 @@ class GeneticPainting:
 
         if gif and frames:
             self._write_gif(gif, frames)
+        if writer:
+            # Hold the final image for two seconds.
+            last = cv2.resize(
+                self.canvas.astype(np.uint8), self._tl_size,
+                interpolation=cv2.INTER_AREA,
+            )
+            for _ in range(2 * timelapse_fps):
+                writer.write(last)
+            writer.release()
+            print(f"timelapse: {timelapse}")
         return self.canvas.astype(np.uint8)
 
     def _gif_frame(self, width):
@@ -508,6 +537,11 @@ def main():
     parser.add_argument("--gif-every", type=int, default=None,
                         help="strokes per GIF frame (default: ~150 frames total)")
     parser.add_argument("--gif-width", type=int, default=640, help="GIF frame width")
+    parser.add_argument("--timelapse", default=None,
+                        help="also write a timelapse video (mp4) to this path; "
+                             "frame interval follows --gif-every")
+    parser.add_argument("--timelapse-width", type=int, default=1280)
+    parser.add_argument("--timelapse-fps", type=int, default=30)
     parser.add_argument("--brush-max-dim", type=int, default=None,
                         help="cap stored brush resolution (default: 2x max stroke "
                              "size; rendering cost scales with brush area)")
@@ -555,6 +589,9 @@ def main():
         gif=args.gif,
         gif_every=args.gif_every,
         gif_width=args.gif_width,
+        timelapse=args.timelapse,
+        timelapse_width=args.timelapse_width,
+        timelapse_fps=args.timelapse_fps,
     )
 
 
