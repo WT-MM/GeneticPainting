@@ -78,6 +78,33 @@ python examples/bad_apple.py bad_apple.mp4 --shapes examples/apples \
 
 Brush photo credits: [examples/apples/SOURCES.md](examples/apples/SOURCES.md).
 
+## How long does it take?
+
+Runtime is roughly `strokes x population x generations x average stroke
+area` — fitness is only evaluated inside each stroke's bounding box, so
+canvas resolution matters through stroke size, not pixel count. Measured
+examples (Apple-silicon laptop unless noted):
+
+| render | settings | time |
+|---|---|---|
+| quick draft | 60 strokes, 400px | < 1 s |
+| painterly skyline | 3,000 strokes, 1600px, pop 32 x gen 10 | ~10 min |
+| refinement pass | 700–900 small strokes | 1–3 min |
+| apple collage | 10,000 strokes, 1600px | ~1 h |
+| apple collage | 16,000 strokes, 2000px (16-core Linux box) | ~2.5 h |
+
+Video painting is a different regime because the canvas persists across
+frames: a static scene costs one 20-stroke batch (~0.1 s) while a scene
+cut costs hundreds of strokes. Bad Apple!! (2,610 frames, 12 fps)
+averaged 0.6–0.8 s/frame at 480px (~35 min total) and ~2.7 s/frame at
+1080p (~2.8 h).
+
+Knobs, in order of leverage: stroke count and `population x generations`
+scale linearly (stills use 32x10, video 12x3); resolution scales roughly
+quadratically since stroke sizes track the canvas; and in collage mode
+`--brush-max-dim` matters a lot — every evaluation resizes the stored
+brush, so photo-sized brushes cost ~4x more than capped ones.
+
 ## Brushes
 
 `generate.py` accepts any directory (or glob) of brush images via
